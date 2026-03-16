@@ -193,10 +193,7 @@ class GaussianPyramid {
 
   /**
    * Extract the mean colour at the coarsest pyramid level from `roi` in `source`.
-   * This mirrors what EVM does: decompose → filter temporally at each level.
-   * For rPPG we only need the coarsest (most spatially averaged) level.
-   *
-   * @param {HTMLVideoElement|OffscreenCanvas} source
+   * @param {HTMLVideoElement} source
    * @param {{ x, y, w, h }} roi
    * @returns {{ r, g, b }}
    */
@@ -223,6 +220,30 @@ class GaussianPyramid {
       b += level.data[i * 4 + 2];
     }
     return { r: r / n, g: g / n, b: b / n };
+  }
+
+  /**
+   * Build a full Gaussian pyramid from the ROI, returning all levels.
+   * Level 0 = original ROI pixels, level N = N times downsampled.
+   * @param {HTMLVideoElement} source
+   * @param {{ x, y, w, h }} roi
+   * @param {number} numLevels
+   * @returns {{ data: Uint8ClampedArray, w: number, h: number }[]}
+   */
+  buildPyramid(source, roi, numLevels) {
+    const { x, y, w, h } = roi;
+    this._canvas.width = w;
+    this._canvas.height = h;
+    this._ctx.drawImage(source, x, y, w, h, 0, 0, w, h);
+    const imgData = this._ctx.getImageData(0, 0, w, h);
+
+    const pyramid = [{ data: imgData.data, w, h }];
+    let current = pyramid[0];
+    for (let l = 0; l < numLevels; l++) {
+      current = this._downsample(current.data, current.w, current.h);
+      pyramid.push(current);
+    }
+    return pyramid;
   }
 
   /** 2× Gaussian downsample (box filter over 2×2 blocks) */
@@ -525,23 +546,50 @@ class WaveformRenderer {
 }
 
 class OverlayRenderer {
-  constructor(canvas) {
+  /**
+   * @param {HTMLCanvasElement} canvas
+   * @param {HTMLVideoElement} video  – needed to map ROI coords (video space) to canvas space
+   */
+  constructor(canvas, video) {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
+    this.video = video;
+  }
+
+  /**
+   * Compute the transform that maps video-pixel coordinates to CSS-pixel coordinates
+   * on the overlay canvas, accounting for object-fit: cover scaling.
+   * Returns { s, ox, oy } where  canvasX = roi.x * s + ox.
+   */
+  _getVideoTransform() {
+    const v = this.video;
+    if (!v || !v.videoWidth) return null;
+    const cw = this.canvas.offsetWidth;
+    const ch = this.canvas.offsetHeight;
+    if (!cw || !ch) return null;
+    const s = Math.max(cw / v.videoWidth, ch / v.videoHeight);
+    return { s, ox: (cw - v.videoWidth * s) / 2, oy: (ch - v.videoHeight * s) / 2 };
   }
 
   /**
    * Draw face guide, ROI box, and optional EVM colour-amplification overlay.
-   *
-   * The EVM overlay makes the pulse *visible*: as the bandpassed signal
-   * swings positive (systole → skin reddens) we overlay red; negative
-   * (diastole) we overlay blue/green.  Amplitude is proportional to the
-   * signal magnitude, mirroring what the MIT EVM paper visualises.
+   * All ROI coordinates are in video pixel space and are scaled to canvas space.
    */
   draw(roi, result, filteredSignal, evmEnabled) {
     const ctx = this.ctx;
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    // Use logical CSS-pixel dimensions (canvas context has devicePixelRatio scale applied)
+    const W = this.canvas.offsetWidth;
+    const H = this.canvas.offsetHeight;
+    ctx.clearRect(0, 0, W, H);
     if (!roi) return;
+
+    const t = this._getVideoTransform();
+    if (!t) return;
+
+    // Helpers to map video coords → canvas CSS-pixel coords
+    const mx = (x) => t.ox + x * t.s;
+    const my = (y) => t.oy + y * t.s;
+    const ms = (s) => s * t.s;
 
     const conf = result?.confidence || 0;
     const faceBox = roi.faceBox;
@@ -549,9 +597,7 @@ class OverlayRenderer {
     // ── EVM colour-amplification overlay ──────────────────────────────────
     if (evmEnabled && filteredSignal.length > 0 && faceBox) {
       const sigVal = filteredSignal[filteredSignal.length - 1];
-      // Amplification factor (tanh keeps it bounded)
       const amp = Math.tanh(Math.abs(sigVal) * 40) * 0.28;
-      // Systole → reddish; diastole → slightly cyan
       const [r, g, b] = sigVal > 0 ? [255, 60, 60] : [60, 200, 255];
 
       ctx.save();
@@ -559,13 +605,11 @@ class OverlayRenderer {
       ctx.fillStyle = `rgb(${r},${g},${b})`;
       ctx.beginPath();
       ctx.ellipse(
-        faceBox.x + faceBox.w / 2,
-        faceBox.y + faceBox.h / 2,
-        faceBox.w / 2,
-        faceBox.h / 2,
-        0,
-        0,
-        Math.PI * 2
+        mx(faceBox.x + faceBox.w / 2),
+        my(faceBox.y + faceBox.h / 2),
+        ms(faceBox.w / 2),
+        ms(faceBox.h / 2),
+        0, 0, Math.PI * 2
       );
       ctx.fill();
       ctx.restore();
@@ -573,7 +617,8 @@ class OverlayRenderer {
 
     // ── Face bounding-box corners ──────────────────────────────────────────
     if (faceBox) {
-      const { x, y, w, h } = faceBox;
+      const fx = mx(faceBox.x), fy = my(faceBox.y);
+      const fw = ms(faceBox.w), fh = ms(faceBox.h);
       const color =
         conf > 0.55
           ? "#00ff88"
@@ -582,27 +627,27 @@ class OverlayRenderer {
           : "rgba(255,255,255,0.35)";
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
-      const c = Math.min(w, h) * 0.14;
-      this._corner(ctx, x, y, c, c);
-      this._corner(ctx, x + w, y, -c, c);
-      this._corner(ctx, x, y + h, c, -c);
-      this._corner(ctx, x + w, y + h, -c, -c);
+      const c = Math.min(fw, fh) * 0.14;
+      this._corner(ctx, fx, fy, c, c);
+      this._corner(ctx, fx + fw, fy, -c, c);
+      this._corner(ctx, fx, fy + fh, c, -c);
+      this._corner(ctx, fx + fw, fy + fh, -c, -c);
 
-      // "Detected" / "Searching" badge
       ctx.font = "11px -apple-system,sans-serif";
       ctx.fillStyle = color;
-      ctx.fillText(roi.detected ? "Face detected" : "Align face here", x, y - 6);
+      ctx.fillText(roi.detected ? "Face detected" : "Align face here", fx, fy - 6);
     }
 
     // ── Forehead ROI dashed rectangle ─────────────────────────────────────
+    const rx = mx(roi.x), ry = my(roi.y), rw = ms(roi.w), rh = ms(roi.h);
     ctx.strokeStyle = "rgba(0,255,136,0.55)";
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
-    ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+    ctx.strokeRect(rx, ry, rw, rh);
     ctx.setLineDash([]);
     ctx.fillStyle = "rgba(0,255,136,0.7)";
     ctx.font = "10px -apple-system,sans-serif";
-    ctx.fillText("Forehead ROI", roi.x + 2, roi.y - 4);
+    ctx.fillText("Forehead ROI", rx + 2, ry - 4);
   }
 
   _corner(ctx, x, y, dx, dy) {
@@ -615,34 +660,50 @@ class OverlayRenderer {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Debug Renderer – amplified raw video PiP
+//  Debug Renderer – amplified raw video + pyramid level views
 // ═══════════════════════════════════════════════════════════════════════════
 
 class DebugRenderer {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d", { willReadFrequently: true });
+    // Persistent canvas for pyramid level upscaling
+    this._lvlCanvas = document.createElement("canvas");
+    this._lvlCtx = this._lvlCanvas.getContext("2d");
+    // Pyramid builder for full-frame levels
+    this._pyramid = new GaussianPyramid(3);
   }
 
   /**
-   * Draw the current video frame with the CHROM EVM signal amplified 150×
-   * directly onto every pixel (3ΔR − 2ΔG), plus ROI outlines for reference.
+   * Draw the debug view.
+   * @param {HTMLVideoElement} video
+   * @param {object} roi  – ROI in video pixel space
+   * @param {number[]} filteredSignal
+   * @param {number} pyramidLevel  -1 = EVM amplified, 0 = raw, 1–3 = pyramid level
+   * @param {boolean} isMirrored   – true for front camera (match CSS scaleX(-1) on video)
    */
-  draw(video, roi, filteredSignal) {
+  draw(video, roi, filteredSignal, pyramidLevel, isMirrored) {
+    if (!video || video.readyState < 2 || !video.videoWidth) return;
+
+    if (pyramidLevel === -1) {
+      this._drawEVM(video, roi, filteredSignal, isMirrored);
+    } else {
+      this._drawPyramidLevel(video, roi, pyramidLevel, isMirrored);
+    }
+  }
+
+  /** EVM amplified view – CHROM signal coloured onto full video frame */
+  _drawEVM(video, roi, filteredSignal, isMirrored) {
     const W = this.canvas.width;
     const H = this.canvas.height;
     const ctx = this.ctx;
 
-    if (!video || video.readyState < 2 || !video.videoWidth) return;
-
-    // Draw mirrored video frame (matches CSS scaleX(-1) on the main video)
     ctx.save();
-    ctx.translate(W, 0);
-    ctx.scale(-1, 1);
+    if (isMirrored) { ctx.translate(W, 0); ctx.scale(-1, 1); }
     ctx.drawImage(video, 0, 0, W, H);
     ctx.restore();
 
-    // Apply CHROM amplification: shift R up and G down proportional to sigVal
+    // Apply CHROM amplification
     const sigVal = filteredSignal.length > 0
       ? filteredSignal[filteredSignal.length - 1]
       : 0;
@@ -659,42 +720,120 @@ class DebugRenderer {
       ctx.putImageData(imgData, 0, 0);
     }
 
-    // Draw ROI boxes (mirrored to match video)
-    if (roi) {
-      const sx = W / video.videoWidth;
-      const sy = H / video.videoHeight;
+    this._drawROIBoxes(video, roi, isMirrored);
+    this._drawInfoBar(`EVM ×150  sig: ${sigVal.toFixed(4)}`, sigVal > 0 ? "#ff6060" : "#60c8ff");
+  }
 
-      if (roi.faceBox) {
-        const fb = roi.faceBox;
-        ctx.strokeStyle = "rgba(255,220,0,0.75)";
-        ctx.lineWidth = 1;
+  /**
+   * Show the video frame at a given Gaussian pyramid level (blurred/downsampled
+   * then upscaled back with nearest-neighbour so pixelation is visible).
+   * Level 0 = raw, level 1–3 = progressively blurred.
+   */
+  _drawPyramidLevel(video, roi, level, isMirrored) {
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const ctx = this.ctx;
+
+    if (level === 0) {
+      // Raw frame
+      ctx.save();
+      if (isMirrored) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+      ctx.drawImage(video, 0, 0, W, H);
+      ctx.restore();
+    } else {
+      // Build pyramid on the forehead ROI region and display it
+      // (we use the ROI so performance stays reasonable)
+      if (!roi) {
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, W, H);
+      } else {
+        const levels = this._pyramid.buildPyramid(video, roi, level);
+        const lvl = levels[level];
+
+        // Put downsampled level into a temporary canvas
+        this._lvlCanvas.width = lvl.w;
+        this._lvlCanvas.height = lvl.h;
+        this._lvlCtx.putImageData(new ImageData(lvl.data, lvl.w, lvl.h), 0, 0);
+
+        // Black background
+        ctx.fillStyle = "#111";
+        ctx.fillRect(0, 0, W, H);
+
+        // Show the raw video (dimmed) as context behind the pyramid ROI
+        ctx.save();
+        ctx.globalAlpha = 0.35;
+        if (isMirrored) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+        ctx.drawImage(video, 0, 0, W, H);
+        ctx.restore();
+
+        // Compute display rect for the ROI (same scaling as the overlay)
+        const s = Math.max(W / video.videoWidth, H / video.videoHeight);
+        const ox = (W - video.videoWidth * s) / 2;
+        const oy = (H - video.videoHeight * s) / 2;
+
+        // Destination rect in debug canvas (mirrored if needed)
+        let destX = ox + roi.x * s;
+        const destY = oy + roi.y * s;
+        const destW = roi.w * s;
+        const destH = roi.h * s;
+        if (isMirrored) destX = W - destX - destW;
+
+        // Upscale pyramid level (nearest-neighbour) into ROI rect
+        ctx.save();
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(this._lvlCanvas, destX, destY, destW, destH);
+        ctx.restore();
+
+        // Border around the ROI
+        ctx.strokeStyle = "rgba(0,255,136,0.8)";
+        ctx.lineWidth = 1.5;
         ctx.setLineDash([]);
-        ctx.strokeRect(
-          W - (fb.x + fb.w) * sx, fb.y * sy,
-          fb.w * sx, fb.h * sy
-        );
+        ctx.strokeRect(destX, destY, destW, destH);
       }
-
-      ctx.strokeStyle = "rgba(0,255,136,0.9)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 2]);
-      ctx.strokeRect(
-        W - (roi.x + roi.w) * sx, roi.y * sy,
-        roi.w * sx, roi.h * sy
-      );
-      ctx.setLineDash([]);
     }
 
-    // Info bar
+    this._drawROIBoxes(video, roi, isMirrored);
+    const label = level === 0 ? "Raw (L0)" : `Gaussian pyramid L${level}`;
+    this._drawInfoBar(label, "#00ff88");
+  }
+
+  /** Draw face bounding box and forehead ROI on the debug canvas */
+  _drawROIBoxes(video, roi, isMirrored) {
+    if (!roi) return;
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const ctx = this.ctx;
+
+    const sx = W / video.videoWidth;
+    const sy = H / video.videoHeight;
+
+    if (roi.faceBox) {
+      const fb = roi.faceBox;
+      let fbX = fb.x * sx;
+      if (isMirrored) fbX = W - fbX - fb.w * sx;
+      ctx.strokeStyle = "rgba(255,220,0,0.75)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.strokeRect(fbX, fb.y * sy, fb.w * sx, fb.h * sy);
+    }
+
+    let roiX = roi.x * sx;
+    if (isMirrored) roiX = W - roiX - roi.w * sx;
+    ctx.strokeStyle = "rgba(0,255,136,0.9)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 2]);
+    ctx.strokeRect(roiX, roi.y * sy, roi.w * sx, roi.h * sy);
+    ctx.setLineDash([]);
+  }
+
+  _drawInfoBar(text, color) {
+    const ctx = this.ctx;
+    const W = this.canvas.width;
     ctx.fillStyle = "rgba(0,0,0,0.6)";
     ctx.fillRect(0, 0, W, 14);
-    ctx.fillStyle = "#00ff88";
-    ctx.font = "9px -apple-system,sans-serif";
-    const color = sigVal > 0 ? "#ff6060" : "#60c8ff";
-    ctx.fillStyle = "#ccc";
-    ctx.fillText("EVM ×150", 3, 10);
     ctx.fillStyle = color;
-    ctx.fillText(`  sig: ${sigVal.toFixed(4)}`, 48, 10);
+    ctx.font = "9px -apple-system,sans-serif";
+    ctx.fillText(text, 3, 10);
   }
 }
 
@@ -724,19 +863,24 @@ class HeartFaceApp {
     this.$camBtn = document.getElementById("cam-btn");
     this.$debugBtn = document.getElementById("debug-btn");
     this.$debugCanvas = document.getElementById("debug-canvas");
+    this.$debugLevelSelect = document.getElementById("debug-level-select");
     this.$cameraPreSelect = document.getElementById("camera-pre-select");
 
     // Engines
     this.signalEngine = new SignalEngine();
     this.roiTracker = new ROITracker();
     this.waveformRenderer = new WaveformRenderer(this.$waveform);
-    this.overlayRenderer = new OverlayRenderer(this.$overlay);
+    // OverlayRenderer receives the video element for coordinate scaling
+    this.overlayRenderer = new OverlayRenderer(this.$overlay, this.$video);
     this.debugRenderer = new DebugRenderer(this.$debugCanvas);
 
     // State
     this.running = false;
     this.evmEnabled = false;
-    this.debugEnabled = false;
+    /** 0 = off, 1 = PiP, 2 = full-page */
+    this.debugMode = 0;
+    /** -1 = EVM amplified, 0 = raw, 1-3 = pyramid level */
+    this.debugLevel = -1;
     this.facingMode = "user";
     this.stream = null;
     this.frameCount = 0;
@@ -751,6 +895,8 @@ class HeartFaceApp {
     this._onResize();
     window.addEventListener("resize", () => this._onResize());
   }
+
+  get debugEnabled() { return this.debugMode > 0; }
 
   // ── Setup ──────────────────────────────────────────────────────────────
 
@@ -772,6 +918,9 @@ class HeartFaceApp {
     });
     this.$camBtn.addEventListener("click", () => this._switchCamera());
     this.$debugBtn.addEventListener("click", () => this._toggleDebug());
+    this.$debugLevelSelect.addEventListener("change", (e) => {
+      this.debugLevel = parseInt(e.target.value, 10);
+    });
   }
 
   _initPWA() {
@@ -793,6 +942,11 @@ class HeartFaceApp {
       c.height = c.offsetHeight * devicePixelRatio;
       c.getContext("2d").scale(devicePixelRatio, devicePixelRatio);
     });
+    // Re-size full-page debug canvas if active
+    if (this.debugMode === 2) {
+      this.$debugCanvas.width = this.$debugCanvas.offsetWidth;
+      this.$debugCanvas.height = this.$debugCanvas.offsetHeight;
+    }
   }
 
   async _install() {
@@ -826,9 +980,12 @@ class HeartFaceApp {
   _updateCamBtn() {
     const label = this.facingMode === "user" ? "Front" : "Back";
     this.$camBtn.textContent = `Camera: ${label}`;
-    // Mirror the video — front camera flipped, back camera not
+    // Mirror the video for front camera (selfie); back camera shows natural orientation
     const mirror = this.facingMode === "user" ? "scaleX(-1)" : "none";
     this.$video.style.transform = mirror;
+    // The overlay canvas draws in video-native coordinate space.
+    // For front camera: apply the same CSS mirror so the overlay aligns with the video.
+    // For back camera: no mirror needed.
     this.$overlay.style.transform = mirror;
   }
 
@@ -861,15 +1018,12 @@ class HeartFaceApp {
   async _switchCamera() {
     if (!this.running) return;
 
-    // Stop current tracks
     if (this.stream) {
       this.stream.getTracks().forEach((t) => t.stop());
     }
 
-    // Flip facing mode
     this.facingMode = this.facingMode === "user" ? "environment" : "user";
 
-    // Reset signal so stale data from the old camera doesn't pollute estimates
     this.signalEngine.clear();
     this.frameCount = 0;
     this.bpmHistory = [];
@@ -892,14 +1046,32 @@ class HeartFaceApp {
     }
   }
 
+  /** Cycle through: off → PiP → full-page → off */
   _toggleDebug() {
-    this.debugEnabled = !this.debugEnabled;
-    this.$debugBtn.classList.toggle("active", this.debugEnabled);
-    this.$debugBtn.textContent = this.debugEnabled ? "Hide Debug" : "Debug View";
-    this.$debugCanvas.classList.toggle("hidden", !this.debugEnabled);
-    if (this.debugEnabled) {
+    this.debugMode = (this.debugMode + 1) % 3;
+
+    const labels = ["Debug View", "Debug: PiP ▼", "Debug: Full ▼"];
+    this.$debugBtn.textContent = labels[this.debugMode];
+    this.$debugBtn.classList.toggle("active", this.debugMode > 0);
+    this.$debugLevelSelect.classList.toggle("hidden", this.debugMode === 0);
+
+    if (this.debugMode === 0) {
+      // Off
+      this.$debugCanvas.classList.add("hidden");
+      this.$debugCanvas.classList.remove("debug-fullpage");
+    } else if (this.debugMode === 1) {
+      // PiP
+      this.$debugCanvas.classList.remove("hidden");
+      this.$debugCanvas.classList.remove("debug-fullpage");
       this.$debugCanvas.width = 160;
       this.$debugCanvas.height = 120;
+    } else {
+      // Full-page
+      this.$debugCanvas.classList.remove("hidden");
+      this.$debugCanvas.classList.add("debug-fullpage");
+      // Size to fill the camera-wrap area
+      this.$debugCanvas.width = this.$debugCanvas.offsetWidth;
+      this.$debugCanvas.height = this.$debugCanvas.offsetHeight;
     }
   }
 
@@ -918,7 +1090,6 @@ class HeartFaceApp {
 
       this.frameCount++;
 
-      // Estimate heart rate once per second (~30 frames)
       if (this.frameCount % 30 === 0) {
         this._computeHeartRate();
       }
@@ -947,7 +1118,6 @@ class HeartFaceApp {
     }
 
     if (r.status === "ok") {
-      // Smooth BPM over last 5 estimates
       this.bpmHistory.push(Math.round(r.bpm));
       if (this.bpmHistory.length > 5) this.bpmHistory.shift();
       const smoothBPM = Math.round(
@@ -969,7 +1139,6 @@ class HeartFaceApp {
       if (r.confidence > 0.55) {
         this.$statusMsg.textContent = "Good signal — keep still";
         this.$confLabel.textContent = `${pct}% confidence`;
-        // Heartbeat pulse animation on BPM display
         this.$bpmValue.classList.remove("beat");
         void this.$bpmValue.offsetWidth;
         this.$bpmValue.classList.add("beat");
@@ -1008,7 +1177,14 @@ class HeartFaceApp {
     );
 
     if (this.debugEnabled) {
-      this.debugRenderer.draw(this.$video, this.currentROI, filtered);
+      const isMirrored = this.facingMode === "user";
+      this.debugRenderer.draw(
+        this.$video,
+        this.currentROI,
+        filtered,
+        this.debugLevel,
+        isMirrored
+      );
     }
   }
 }
