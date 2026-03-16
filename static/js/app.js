@@ -312,11 +312,13 @@ class SignalEngine {
       this.timestamps.shift();
     }
 
-    // Estimate fps from last 10 frames
+    // Estimate fps from a longer window for stability
     const len = this.timestamps.length;
-    if (len > 10) {
-      const elapsed = this.timestamps[len - 1] - this.timestamps[len - 11];
-      if (elapsed > 0) this.fps = (10 * 1000) / elapsed;
+    if (len > 2) {
+      // Use all available timestamps (up to 120 frames) for a robust estimate
+      const window = Math.min(len - 1, 120);
+      const elapsed = this.timestamps[len - 1] - this.timestamps[len - 1 - window];
+      if (elapsed > 0) this.fps = (window * 1000) / elapsed;
     }
   }
 
@@ -328,7 +330,11 @@ class SignalEngine {
   getSignal() {
     const n = this.buffer.length;
     if (n === 0) return [];
-    const WINSIZE = Math.min(n, 64); // sliding normalisation window
+    // Sliding normalisation window. Using ~1s worth of frames avoids
+    // creating subharmonic artifacts when the pulse period is close to
+    // the window length (which happened with the old 64-frame window at
+    // ~30 fps for HR around 70-80 BPM).
+    const WINSIZE = Math.min(n, Math.max(15, Math.round(this.fps * 1.0)));
 
     const sig = new Array(n).fill(0);
     for (let i = WINSIZE - 1; i < n; i++) {
@@ -370,7 +376,10 @@ class SignalEngine {
         framesNeeded: SignalEngine.MIN_FRAMES - this.buffer.length,
       };
     }
-    const sig = this.getSignal();
+    // Run FFT on the bandpassed signal so the estimate matches what the
+    // EVM overlay visualises. This avoids subharmonic artifacts from the
+    // raw CHROM signal's sliding-window normalisation.
+    const sig = this.getBandpassedSignal();
     const result = DSP.estimateHeartRate(sig, this.fps);
     if (!result) return { status: "error" };
     return { status: "ok", ...result };
