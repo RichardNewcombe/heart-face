@@ -56,17 +56,8 @@
   <!-- ── Waveform ───────────────────────────────────────────────── -->
   <canvas id="waveform"></canvas>
 
-  <!-- ── EVM info strip ─────────────────────────────────────────── -->
-  <div id="evm-panel">
-    <strong>Eulerian Video Magnification active</strong> — subtle blood-flow
-    colour changes in your skin are amplified to show the pulse in real time.
-    <span style="color:rgba(255,100,100,0.9)">Red</span> = systole &nbsp;|&nbsp;
-    <span style="color:rgba(100,200,255,0.9)">Cyan</span> = diastole.
-  </div>
-
   <!-- ── Controls ───────────────────────────────────────────────── -->
   <div id="controls">
-    <button id="evm-btn">Show Pulse Glow</button>
     <button id="cam-btn">Camera: Front</button>
     <button id="debug-btn">Debug View</button>
     <select id="debug-level-select" class="hidden">
@@ -78,13 +69,13 @@
     </select>
     <button id="info-btn">How it works</button>
     <button id="install-btn" class="hidden">Install App</button>
-    <span id="build-tag">v2026-03-16 19:47</span>
+    <span id="build-tag">v2026-03-16 19:56</span>
   </div>
 
   <!-- ── Start screen ───────────────────────────────────────────── -->
   <div id="start-screen" class="screen-overlay">
     <div class="card">
-      <span class="heart-icon">♥</span>
+      <span class="heart-icon">&#9829;</span>
       <h1>HeartFace</h1>
       <p class="tagline">
         Detect your heart rate from your face using
@@ -93,10 +84,10 @@
         <em>visible</em> to the naked eye.
       </p>
       <ul class="tips">
-        <li><span class="tip-icon">💡</span>Sit in bright, even lighting</li>
-        <li><span class="tip-icon">🤳</span>Hold your phone steady</li>
-        <li><span class="tip-icon">😶</span>Keep your face centred in the oval</li>
-        <li><span class="tip-icon">⏱️</span>Stay still for ~10 seconds</li>
+        <li><span class="tip-icon">&#128161;</span>Sit in bright, even lighting</li>
+        <li><span class="tip-icon">&#129499;</span>Hold your phone steady</li>
+        <li><span class="tip-icon">&#128566;</span>Keep your face centred in the oval</li>
+        <li><span class="tip-icon">&#9201;&#65039;</span>Stay still for ~10 seconds</li>
       </ul>
       <div class="camera-select-wrap">
         <label for="camera-pre-select">Camera</label>
@@ -107,7 +98,7 @@
       </div>
       <button id="start-btn">Start Measuring</button>
       <p id="camera-err" class="hidden"></p>
-      <div id="build-version">Build: 2026-03-16 19:47 UTC</div>
+      <div id="build-version">Build: 2026-03-16 19:56 UTC</div>
     </div>
   </div>
 
@@ -134,29 +125,29 @@
           we record how the mean <code>R</code>, <code>G</code>,
           <code>B</code> colour of your forehead changes over time.
           Blood pumping through skin capillaries causes a periodic
-          colour shift of ≈0.5%.
+          colour shift of ~0.5%.
         </li>
         <li>
           <strong>CHROM normalisation</strong> — illumination changes
           are cancelled by computing the chrominance ratio
-          <code>3R − 2G</code>, isolating haemoglobin absorption.
+          <code>3R - 2G</code>, isolating haemoglobin absorption.
         </li>
         <li>
           <strong>Bandpass + FFT</strong> — the signal is filtered to
-          0.75–4 Hz (45–240 BPM) and a Fast Fourier Transform finds
-          the dominant frequency → your heart rate.
+          0.75-4 Hz (45-240 BPM) and a Fast Fourier Transform finds
+          the dominant frequency = your heart rate.
         </li>
         <li>
-          <strong>EVM visualisation</strong> — pressing "Show Pulse Glow"
-          amplifies the bandpassed signal as a colour overlay on your face,
-          making the pulse <em>visible</em> just like the original MIT
-          paper demos.
+          <strong>Camera locking</strong> — auto white balance, exposure,
+          and gain are locked to manual mode where supported, preventing
+          the camera from fighting the subtle colour changes.
         </li>
       </ol>
 
       <p>
         All processing runs <strong>entirely in your browser</strong>.
-        No video is ever sent to a server.
+        No video is ever sent to a server. Use the <strong>Debug View</strong>
+        button to see the full estimation pipeline in real time.
       </p>
 
       <button id="info-close">Close</button>
@@ -165,7 +156,7 @@
 
   <!-- iOS install prompt (shown manually) -->
   <div id="ios-prompt" class="hidden">
-    <span id="ios-dismiss">×</span>
+    <span id="ios-dismiss">&times;</span>
     To install: tap <strong>Share</strong> then
     <strong>"Add to Home Screen"</strong>
   </div>
