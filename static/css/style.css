@@ -360,5 +360,44 @@ button.hidden { display: none !important; }
 #ios-prompt.hidden { display: none; }
 #ios-dismiss { font-size: 18px; position: absolute; top: 6px; right: 10px; cursor: pointer; }
 
+/* ── Camera selector (start screen) ─────────────────────────────────────── */
+.camera-select-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.camera-select-wrap label {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+#camera-pre-select {
+  font-family: var(--font);
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1.5px solid rgba(255,255,255,0.18);
+  border-radius: 20px;
+  padding: 6px 14px;
+  cursor: pointer;
+  appearance: auto;
+}
+#camera-pre-select:focus { outline: none; border-color: var(--primary); }
+
+/* ── Debug PiP canvas ────────────────────────────────────────────────────── */
+#debug-canvas {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 160px;
+  height: 120px;
+  border: 1.5px solid rgba(0,255,136,0.45);
+  border-radius: 8px;
+  z-index: 10;
+  background: #000;
+  pointer-events: none;
+}
+
 /* ── Utility ─────────────────────────────────────────────────────────────── */
 .hidden { display: none !important; }

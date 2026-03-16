@@ -28,6 +28,7 @@
   <div id="camera-wrap">
     <video id="video" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
+    <canvas id="debug-canvas" class="hidden"></canvas>
 
     <!-- Face-guide oval (always visible, behind overlay drawings) -->
     <div id="face-guide">
@@ -65,6 +66,8 @@
   <!-- ── Controls ───────────────────────────────────────────────── -->
   <div id="controls">
     <button id="evm-btn">Show Pulse Glow</button>
+    <button id="cam-btn">Camera: Front</button>
+    <button id="debug-btn">Debug View</button>
     <button id="info-btn">How it works</button>
     <button id="install-btn" class="hidden">Install App</button>
   </div>
@@ -86,6 +89,13 @@
         <li><span class="tip-icon">😶</span>Keep your face centred in the oval</li>
         <li><span class="tip-icon">⏱️</span>Stay still for ~10 seconds</li>
       </ul>
+      <div class="camera-select-wrap">
+        <label for="camera-pre-select">Camera</label>
+        <select id="camera-pre-select">
+          <option value="user">Front (selfie)</option>
+          <option value="environment">Back</option>
+        </select>
+      </div>
       <button id="start-btn">Start Measuring</button>
       <p id="camera-err" class="hidden"></p>
     </div>

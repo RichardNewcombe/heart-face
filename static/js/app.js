@@ -615,6 +615,90 @@ class OverlayRenderer {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Debug Renderer – amplified raw video PiP
+// ═══════════════════════════════════════════════════════════════════════════
+
+class DebugRenderer {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d", { willReadFrequently: true });
+  }
+
+  /**
+   * Draw the current video frame with the CHROM EVM signal amplified 150×
+   * directly onto every pixel (3ΔR − 2ΔG), plus ROI outlines for reference.
+   */
+  draw(video, roi, filteredSignal) {
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const ctx = this.ctx;
+
+    if (!video || video.readyState < 2 || !video.videoWidth) return;
+
+    // Draw mirrored video frame (matches CSS scaleX(-1) on the main video)
+    ctx.save();
+    ctx.translate(W, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, W, H);
+    ctx.restore();
+
+    // Apply CHROM amplification: shift R up and G down proportional to sigVal
+    const sigVal = filteredSignal.length > 0
+      ? filteredSignal[filteredSignal.length - 1]
+      : 0;
+    const GAIN = 150;
+    const dR = sigVal * GAIN * 3;
+    const dG = -sigVal * GAIN * 2;
+    if (Math.abs(sigVal) > 0.0001) {
+      const imgData = ctx.getImageData(0, 0, W, H);
+      const d = imgData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        d[i]     = Math.min(255, Math.max(0, d[i]     + dR));
+        d[i + 1] = Math.min(255, Math.max(0, d[i + 1] + dG));
+      }
+      ctx.putImageData(imgData, 0, 0);
+    }
+
+    // Draw ROI boxes (mirrored to match video)
+    if (roi) {
+      const sx = W / video.videoWidth;
+      const sy = H / video.videoHeight;
+
+      if (roi.faceBox) {
+        const fb = roi.faceBox;
+        ctx.strokeStyle = "rgba(255,220,0,0.75)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([]);
+        ctx.strokeRect(
+          W - (fb.x + fb.w) * sx, fb.y * sy,
+          fb.w * sx, fb.h * sy
+        );
+      }
+
+      ctx.strokeStyle = "rgba(0,255,136,0.9)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 2]);
+      ctx.strokeRect(
+        W - (roi.x + roi.w) * sx, roi.y * sy,
+        roi.w * sx, roi.h * sy
+      );
+      ctx.setLineDash([]);
+    }
+
+    // Info bar
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(0, 0, W, 14);
+    ctx.fillStyle = "#00ff88";
+    ctx.font = "9px -apple-system,sans-serif";
+    const color = sigVal > 0 ? "#ff6060" : "#60c8ff";
+    ctx.fillStyle = "#ccc";
+    ctx.fillText("EVM ×150", 3, 10);
+    ctx.fillStyle = color;
+    ctx.fillText(`  sig: ${sigVal.toFixed(4)}`, 48, 10);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Main Application
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -637,19 +721,28 @@ class HeartFaceApp {
     this.$infoBtn = document.getElementById("info-btn");
     this.$infoModal = document.getElementById("info-modal");
     this.$infoClose = document.getElementById("info-close");
+    this.$camBtn = document.getElementById("cam-btn");
+    this.$debugBtn = document.getElementById("debug-btn");
+    this.$debugCanvas = document.getElementById("debug-canvas");
+    this.$cameraPreSelect = document.getElementById("camera-pre-select");
 
     // Engines
     this.signalEngine = new SignalEngine();
     this.roiTracker = new ROITracker();
     this.waveformRenderer = new WaveformRenderer(this.$waveform);
     this.overlayRenderer = new OverlayRenderer(this.$overlay);
+    this.debugRenderer = new DebugRenderer(this.$debugCanvas);
 
     // State
     this.running = false;
     this.evmEnabled = false;
+    this.debugEnabled = false;
+    this.facingMode = "user";
+    this.stream = null;
     this.frameCount = 0;
     this.currentROI = null;
     this.currentResult = null;
+    this.filteredSignal = [];
     this.bpmHistory = [];
     this._deferredInstall = null;
 
@@ -674,6 +767,11 @@ class HeartFaceApp {
     this.$infoModal.addEventListener("click", (e) => {
       if (e.target === this.$infoModal) this.$infoModal.classList.add("hidden");
     });
+    this.$cameraPreSelect.addEventListener("change", (e) => {
+      this.facingMode = e.target.value;
+    });
+    this.$camBtn.addEventListener("click", () => this._switchCamera());
+    this.$debugBtn.addEventListener("click", () => this._toggleDebug());
   }
 
   _initPWA() {
@@ -716,21 +814,36 @@ class HeartFaceApp {
 
   // ── Camera start ───────────────────────────────────────────────────────
 
+  _buildVideoConstraints(facingMode) {
+    return {
+      facingMode,
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 30 },
+    };
+  }
+
+  _updateCamBtn() {
+    const label = this.facingMode === "user" ? "Front" : "Back";
+    this.$camBtn.textContent = `Camera: ${label}`;
+    // Mirror the video — front camera flipped, back camera not
+    const mirror = this.facingMode === "user" ? "scaleX(-1)" : "none";
+    this.$video.style.transform = mirror;
+    this.$overlay.style.transform = mirror;
+  }
+
   async _start() {
     this.$startBtn.disabled = true;
     this.$startBtn.textContent = "Requesting camera…";
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: "user",
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          frameRate: { ideal: 30 },
-        },
+        video: this._buildVideoConstraints(this.facingMode),
         audio: false,
       });
+      this.stream = stream;
       this.$video.srcObject = stream;
       await this.$video.play();
+      this._updateCamBtn();
       this.$startScreen.classList.add("hidden");
       this.running = true;
       requestAnimationFrame((t) => this._loop(t));
@@ -742,6 +855,51 @@ class HeartFaceApp {
           ? "Camera access denied — please allow camera and reload."
           : `Camera error: ${err.message}`;
       this.$cameraErr.classList.remove("hidden");
+    }
+  }
+
+  async _switchCamera() {
+    if (!this.running) return;
+
+    // Stop current tracks
+    if (this.stream) {
+      this.stream.getTracks().forEach((t) => t.stop());
+    }
+
+    // Flip facing mode
+    this.facingMode = this.facingMode === "user" ? "environment" : "user";
+
+    // Reset signal so stale data from the old camera doesn't pollute estimates
+    this.signalEngine.clear();
+    this.frameCount = 0;
+    this.bpmHistory = [];
+    this.currentResult = null;
+    this.filteredSignal = [];
+    this.$bpmValue.textContent = "--";
+    this.$statusMsg.textContent = "Switching camera…";
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: this._buildVideoConstraints(this.facingMode),
+        audio: false,
+      });
+      this.stream = stream;
+      this.$video.srcObject = stream;
+      await this.$video.play();
+      this._updateCamBtn();
+    } catch (err) {
+      this.$statusMsg.textContent = `Camera error: ${err.message}`;
+    }
+  }
+
+  _toggleDebug() {
+    this.debugEnabled = !this.debugEnabled;
+    this.$debugBtn.classList.toggle("active", this.debugEnabled);
+    this.$debugBtn.textContent = this.debugEnabled ? "Hide Debug" : "Debug View";
+    this.$debugCanvas.classList.toggle("hidden", !this.debugEnabled);
+    if (this.debugEnabled) {
+      this.$debugCanvas.width = 160;
+      this.$debugCanvas.height = 120;
     }
   }
 
@@ -834,6 +992,8 @@ class HeartFaceApp {
         ? this.signalEngine.getBandpassedSignal()
         : [];
 
+    this.filteredSignal = filtered;
+
     this.waveformRenderer.push(filtered);
     this.waveformRenderer.draw(
       this.currentResult?.bpm,
@@ -846,6 +1006,10 @@ class HeartFaceApp {
       filtered,
       this.evmEnabled
     );
+
+    if (this.debugEnabled) {
+      this.debugRenderer.draw(this.$video, this.currentROI, filtered);
+    }
   }
 }
 
