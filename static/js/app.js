@@ -12,7 +12,7 @@
  *  4. Apply CHROM normalisation to cancel illumination variation
  *  5. Bandpass filter 0.75–4 Hz  (45–240 BPM) via IIR cascade
  *  6. FFT on filtered buffer → dominant frequency → BPM
- *  7. EVM visualisation: amplify bandpassed signal as coloured overlay on the face
+ *  7. Debug view: amplify bandpassed signal as coloured overlay on the face
  *     to make the pulse *visible*, as in the original MIT EVM paper.
  */
 
@@ -95,7 +95,7 @@ const DSP = {
 
   /**
    * Estimate dominant heart-rate frequency in `signal` sampled at `fps`.
-   * Returns { bpm, frequency, confidence, spectrum } or null.
+   * Returns { bpm, frequency, confidence, spectrum, snr, fftLen, df, peakBin } or null.
    */
   estimateHeartRate(signal, fps, fMin = 0.75, fMax = 4.0) {
     const n = signal.length;
@@ -149,7 +149,16 @@ const DSP = {
     const snr = maxPow / (avgPow + 1e-10);
     const confidence = Math.min(1, Math.max(0, (snr - 1.5) / 8.5));
 
-    return { bpm: freq * 60, frequency: freq, confidence, spectrum };
+    return {
+      bpm: freq * 60,
+      frequency: freq,
+      confidence,
+      spectrum,
+      snr,
+      fftLen,
+      df,
+      peakBin: maxIdx,
+    };
   },
 
   /**
@@ -299,11 +308,14 @@ class SignalEngine {
     /** @type {number[]} DOMHighResTimeStamp per frame */
     this.timestamps = [];
     this.fps = 30;
+    /** Last raw mean RGB (for debug display) */
+    this.lastMean = { r: 0, g: 0, b: 0 };
   }
 
   /** Add one frame's colour sample to the buffer. */
   addSample(source, roi, timestamp) {
     const mean = this.pyramid.extractMean(source, roi);
+    this.lastMean = mean;
     this.buffer.push(mean);
     this.timestamps.push(timestamp);
 
@@ -367,7 +379,7 @@ class SignalEngine {
 
   /**
    * Estimate heart rate.
-   * @returns {{ status: 'collecting'|'ok'|'error', bpm?, confidence?, framesNeeded? }}
+   * @returns {{ status: 'collecting'|'ok'|'error', bpm?, confidence?, framesNeeded?, ... }}
    */
   estimate() {
     if (this.buffer.length < SignalEngine.MIN_FRAMES) {
@@ -407,6 +419,7 @@ class ROITracker {
     this._lastDetectTime = 0;
     this._detectInterval = 800; // ms between face-api calls
     this._busy = false;
+    this.hasFaceDetector = false;
 
     if ("FaceDetector" in window) {
       try {
@@ -414,6 +427,7 @@ class ROITracker {
           fastMode: true,
           maxDetectedFaces: 1,
         });
+        this.hasFaceDetector = true;
       } catch (_) {
         this._detector = null;
       }
@@ -585,7 +599,7 @@ class OverlayRenderer {
    * When no face detected, nothing is drawn so the static guide oval shows through.
    * Returns true if a detected face was drawn (so the caller can hide the static oval).
    */
-  draw(roi, result, filteredSignal, evmEnabled) {
+  draw(roi, result) {
     const ctx = this.ctx;
     const W = this.canvas.offsetWidth;
     const H = this.canvas.offsetHeight;
@@ -604,26 +618,6 @@ class OverlayRenderer {
 
     const conf = result?.confidence || 0;
     const faceBox = roi.faceBox;
-
-    // ── EVM colour-amplification overlay ──────────────────────────────────
-    if (evmEnabled && filteredSignal.length > 0 && faceBox) {
-      const sigVal = filteredSignal[filteredSignal.length - 1];
-      const amp = Math.tanh(Math.abs(sigVal) * 40) * 0.28;
-      const [r, g, b] = sigVal > 0 ? [255, 60, 60] : [60, 200, 255];
-      ctx.save();
-      ctx.globalAlpha = amp;
-      ctx.fillStyle = `rgb(${r},${g},${b})`;
-      ctx.beginPath();
-      ctx.ellipse(
-        mx(faceBox.x + faceBox.w / 2),
-        my(faceBox.y + faceBox.h / 2),
-        ms(faceBox.w / 2),
-        ms(faceBox.h / 2),
-        0, 0, Math.PI * 2
-      );
-      ctx.fill();
-      ctx.restore();
-    }
 
     // ── Face bounding-box corners ──────────────────────────────────────────
     if (faceBox) {
@@ -660,7 +654,7 @@ class OverlayRenderer {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Debug Renderer – amplified raw video + pyramid level views
+//  Debug Renderer – amplified raw video + pyramid level views + diagnostics
 // ═══════════════════════════════════════════════════════════════════════════
 
 class DebugRenderer {
@@ -681,14 +675,20 @@ class DebugRenderer {
    * @param {number[]} filteredSignal
    * @param {number} pyramidLevel  -1 = EVM amplified, 0 = raw, 1–3 = pyramid level
    * @param {boolean} isMirrored   – true for front camera (match CSS scaleX(-1) on video)
+   * @param {object} diagnostics   – { fps, bufferLen, result, lastMean, cameraConstraints }
    */
-  draw(video, roi, filteredSignal, pyramidLevel, isMirrored) {
+  draw(video, roi, filteredSignal, pyramidLevel, isMirrored, diagnostics) {
     if (!video || video.readyState < 2 || !video.videoWidth) return;
 
     if (pyramidLevel === -1) {
       this._drawEVM(video, roi, filteredSignal, isMirrored);
     } else {
       this._drawPyramidLevel(video, roi, pyramidLevel, isMirrored);
+    }
+
+    // Always draw diagnostics overlay on top
+    if (diagnostics) {
+      this._drawDiagnostics(diagnostics);
     }
   }
 
@@ -721,7 +721,6 @@ class DebugRenderer {
     }
 
     this._drawROIBoxes(video, roi, isMirrored);
-    this._drawInfoBar(`EVM ×150  sig: ${sigVal.toFixed(4)}`, sigVal > 0 ? "#ff6060" : "#60c8ff");
   }
 
   /**
@@ -742,7 +741,6 @@ class DebugRenderer {
       ctx.restore();
     } else {
       // Build pyramid on the forehead ROI region and display it
-      // (we use the ROI so performance stays reasonable)
       if (!roi) {
         ctx.fillStyle = "#000";
         ctx.fillRect(0, 0, W, H);
@@ -766,12 +764,11 @@ class DebugRenderer {
         ctx.drawImage(video, 0, 0, W, H);
         ctx.restore();
 
-        // Compute display rect for the ROI (same scaling as the overlay)
+        // Compute display rect for the ROI
         const s = Math.max(W / video.videoWidth, H / video.videoHeight);
         const ox = (W - video.videoWidth * s) / 2;
         const oy = (H - video.videoHeight * s) / 2;
 
-        // Destination rect in debug canvas (mirrored if needed)
         let destX = ox + roi.x * s;
         const destY = oy + roi.y * s;
         const destW = roi.w * s;
@@ -793,8 +790,6 @@ class DebugRenderer {
     }
 
     this._drawROIBoxes(video, roi, isMirrored);
-    const label = level === 0 ? "Raw (L0)" : `Gaussian pyramid L${level}`;
-    this._drawInfoBar(label, "#00ff88");
   }
 
   /** Draw face bounding box and forehead ROI on the debug canvas */
@@ -821,19 +816,142 @@ class DebugRenderer {
     if (isMirrored) roiX = W - roiX - roi.w * sx;
     ctx.strokeStyle = "rgba(0,255,136,0.9)";
     ctx.lineWidth = 1;
-    ctx.setLineDash([3, 2]);
+    ctx.setLineDash([3, 3]);
     ctx.strokeRect(roiX, roi.y * sy, roi.w * sx, roi.h * sy);
     ctx.setLineDash([]);
   }
 
-  _drawInfoBar(text, color) {
+  /** Draw diagnostics overlay panel with estimation pipeline details */
+  _drawDiagnostics(d) {
     const ctx = this.ctx;
     const W = this.canvas.width;
-    ctx.fillStyle = "rgba(0,0,0,0.6)";
-    ctx.fillRect(0, 0, W, 14);
-    ctx.fillStyle = color;
-    ctx.font = "9px -apple-system,sans-serif";
-    ctx.fillText(text, 3, 10);
+    const H = this.canvas.height;
+
+    // Semi-transparent panel on the right side
+    const panelW = Math.min(280, W * 0.45);
+    const panelX = W - panelW;
+    ctx.fillStyle = "rgba(0,0,0,0.75)";
+    ctx.fillRect(panelX, 0, panelW, H);
+
+    // Left border
+    ctx.strokeStyle = "rgba(0,255,136,0.3)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(panelX, 0);
+    ctx.lineTo(panelX, H);
+    ctx.stroke();
+
+    const x = panelX + 8;
+    let y = 16;
+    const lineH = 14;
+
+    const label = (text, color = "#888") => {
+      ctx.fillStyle = color;
+      ctx.font = "10px monospace";
+      ctx.fillText(text, x, y);
+      y += lineH;
+    };
+
+    const value = (name, val, color = "#00ff88") => {
+      ctx.fillStyle = "#888";
+      ctx.font = "10px monospace";
+      ctx.fillText(name + ": ", x, y);
+      const nameW = ctx.measureText(name + ": ").width;
+      ctx.fillStyle = color;
+      ctx.fillText(val, x + nameW, y);
+      y += lineH;
+    };
+
+    // ── Section: Camera ──
+    label("── CAMERA ──", "#00ff88");
+    value("Est. FPS", d.fps.toFixed(1));
+    value("Resolution", `${d.videoW}x${d.videoH}`);
+    value("Face Detect", d.hasFaceDetector ? "YES (native)" : "NO (fallback ROI)", d.hasFaceDetector ? "#00ff88" : "#ff4466");
+    value("ROI detected", d.roiDetected ? "YES" : "NO (centre fallback)", d.roiDetected ? "#00ff88" : "#ffcc00");
+
+    // Camera constraints
+    if (d.cameraSettings) {
+      const cs = d.cameraSettings;
+      value("WB mode", cs.whiteBalanceMode || "auto", cs.whiteBalanceMode === "manual" ? "#00ff88" : "#ff4466");
+      value("Exposure", cs.exposureMode || "auto", cs.exposureMode === "manual" ? "#00ff88" : "#ff4466");
+    } else {
+      value("WB/Exp", "no track settings", "#ff4466");
+    }
+
+    y += 4;
+
+    // ── Section: Signal ──
+    label("── SIGNAL ──", "#00ff88");
+    value("Buffer", `${d.bufferLen} / ${SignalEngine.MAX_FRAMES} frames`);
+    value("Buffer time", `${(d.bufferLen / d.fps).toFixed(1)}s`);
+    if (d.lastMean) {
+      value("Mean RGB", `${d.lastMean.r.toFixed(1)} ${d.lastMean.g.toFixed(1)} ${d.lastMean.b.toFixed(1)}`);
+    }
+    if (d.chromSigVal !== undefined) {
+      value("CHROM val", d.chromSigVal.toFixed(6));
+    }
+    value("CHROM win", `${d.chromWinSize} frames`);
+
+    y += 4;
+
+    // ── Section: Estimation ──
+    label("── ESTIMATE ──", "#00ff88");
+    if (d.result && d.result.status === "ok") {
+      value("BPM (raw)", d.result.bpm.toFixed(1));
+      value("BPM (smooth)", d.smoothBPM ? d.smoothBPM.toString() : "--");
+      value("Peak freq", `${d.result.frequency.toFixed(3)} Hz`);
+      value("Peak bin", `${d.result.peakBin}`);
+      value("FFT len", `${d.result.fftLen}`);
+      value("Bin res", `${d.result.df.toFixed(4)} Hz (${(d.result.df * 60).toFixed(2)} BPM)`);
+      value("SNR", d.result.snr.toFixed(2), d.result.snr > 5 ? "#00ff88" : "#ffcc00");
+      value("Confidence", `${(d.result.confidence * 100).toFixed(1)}%`,
+        d.result.confidence > 0.55 ? "#00ff88" : d.result.confidence > 0.25 ? "#ffcc00" : "#ff4466");
+
+      // ── Mini FFT spectrum ──
+      y += 6;
+      label("── FFT SPECTRUM ──", "#00ff88");
+      this._drawMiniSpectrum(ctx, x, y, panelW - 16, 60, d.result.spectrum, d.result.bpm);
+      y += 68;
+    } else if (d.result && d.result.status === "collecting") {
+      value("Status", `collecting (${d.result.framesNeeded} more)`, "#ffcc00");
+    } else {
+      value("Status", "no estimate", "#ff4466");
+    }
+  }
+
+  /** Draw a mini FFT power spectrum chart */
+  _drawMiniSpectrum(ctx, x, y, w, h, spectrum, peakBPM) {
+    if (!spectrum || spectrum.length === 0) return;
+
+    // Background
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(x, y, w, h);
+
+    // Find max power for normalization
+    const maxPow = spectrum.reduce((m, s) => Math.max(m, s.power), 0);
+    if (maxPow <= 0) return;
+
+    const barW = w / spectrum.length;
+
+    for (let i = 0; i < spectrum.length; i++) {
+      const s = spectrum[i];
+      const normH = (s.power / maxPow) * (h - 12);
+      const isPeak = Math.abs(s.bpm - peakBPM) < 5;
+      ctx.fillStyle = isPeak ? "#00ff88" : "rgba(0,255,136,0.25)";
+      ctx.fillRect(x + i * barW, y + h - normH, Math.max(1, barW - 0.5), normH);
+    }
+
+    // Axis labels
+    ctx.fillStyle = "#666";
+    ctx.font = "8px monospace";
+    const minBPM = spectrum[0].bpm;
+    const maxBPM = spectrum[spectrum.length - 1].bpm;
+    ctx.fillText(`${Math.round(minBPM)}`, x, y + h + 8);
+    ctx.fillText(`${Math.round(maxBPM)} BPM`, x + w - 40, y + h + 8);
+
+    // Peak marker
+    ctx.fillStyle = "#00ff88";
+    ctx.fillText(`peak: ${Math.round(peakBPM)}`, x + w / 2 - 20, y + 8);
   }
 }
 
@@ -851,12 +969,10 @@ class HeartFaceApp {
     this.$statusMsg = document.getElementById("status-msg");
     this.$confFill = document.getElementById("conf-fill");
     this.$confLabel = document.getElementById("conf-label");
-    this.$evmBtn = document.getElementById("evm-btn");
     this.$installBtn = document.getElementById("install-btn");
     this.$startScreen = document.getElementById("start-screen");
     this.$startBtn = document.getElementById("start-btn");
     this.$cameraErr = document.getElementById("camera-err");
-    this.$evmPanel = document.getElementById("evm-panel");
     this.$infoBtn = document.getElementById("info-btn");
     this.$infoModal = document.getElementById("info-modal");
     this.$infoClose = document.getElementById("info-close");
@@ -872,13 +988,11 @@ class HeartFaceApp {
     this.signalEngine = new SignalEngine();
     this.roiTracker = new ROITracker();
     this.waveformRenderer = new WaveformRenderer(this.$waveform);
-    // OverlayRenderer receives the video element for coordinate scaling
     this.overlayRenderer = new OverlayRenderer(this.$overlay, this.$video);
     this.debugRenderer = new DebugRenderer(this.$debugCanvas);
 
     // State
     this.running = false;
-    this.evmEnabled = false;
     /** 0 = off, 1 = full-page */
     this.debugMode = 0;
     /** -1 = EVM amplified, 0 = raw, 1-3 = pyramid level */
@@ -892,6 +1006,7 @@ class HeartFaceApp {
     this.bpmHistory = [];
     this._deferredInstall = null;
     this._beatInterval = null;  // timer for BPM-synced pulsing
+    this._cameraSettings = null; // track camera settings for debug
 
     this._bindEvents();
     this._initPWA();
@@ -905,7 +1020,6 @@ class HeartFaceApp {
 
   _bindEvents() {
     this.$startBtn.addEventListener("click", () => this._start());
-    this.$evmBtn.addEventListener("click", () => this._toggleEVM());
     this.$installBtn.addEventListener("click", () => this._install());
     this.$infoBtn.addEventListener("click", () => {
       this.$infoModal.classList.remove("hidden");
@@ -960,15 +1074,6 @@ class HeartFaceApp {
     this._deferredInstall = null;
   }
 
-  _toggleEVM() {
-    this.evmEnabled = !this.evmEnabled;
-    this.$evmBtn.classList.toggle("active", this.evmEnabled);
-    this.$evmBtn.textContent = this.evmEnabled
-      ? "Hide Pulse Glow"
-      : "Show Pulse Glow";
-    this.$evmPanel.classList.toggle("visible", this.evmEnabled);
-  }
-
   // ── Camera start ───────────────────────────────────────────────────────
 
   _buildVideoConstraints(facingMode) {
@@ -978,6 +1083,51 @@ class HeartFaceApp {
       height: { ideal: 480 },
       frameRate: { ideal: 30 },
     };
+  }
+
+  /**
+   * After the camera stream starts, attempt to lock white balance, exposure,
+   * and gain to prevent the camera's auto-adjustments from fighting the
+   * subtle colour changes the rPPG algorithm needs to detect.
+   */
+  async _lockCameraSettings(stream) {
+    try {
+      const track = stream.getVideoTracks()[0];
+      if (!track) return;
+
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      const constraints = {};
+
+      // Lock white balance to manual/continuous if supported
+      if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes("manual")) {
+        constraints.whiteBalanceMode = "manual";
+      }
+
+      // Lock exposure to manual/continuous if supported
+      if (caps.exposureMode && caps.exposureMode.includes("manual")) {
+        constraints.exposureMode = "manual";
+      }
+
+      // Lock focus to continuous if supported (avoid focus hunting)
+      if (caps.focusMode && caps.focusMode.includes("continuous")) {
+        constraints.focusMode = "continuous";
+      }
+
+      if (Object.keys(constraints).length > 0) {
+        await track.applyConstraints({ advanced: [constraints] });
+        console.log("[HeartFace] Camera locked:", constraints);
+      }
+
+      // Store current settings for debug display
+      this._cameraSettings = track.getSettings ? track.getSettings() : null;
+    } catch (err) {
+      console.warn("[HeartFace] Could not lock camera settings:", err.message);
+      // Still try to read settings even if locking failed
+      try {
+        const track = stream.getVideoTracks()[0];
+        this._cameraSettings = track && track.getSettings ? track.getSettings() : null;
+      } catch (_) {}
+    }
   }
 
   _updateCamBtn() {
@@ -1003,6 +1153,10 @@ class HeartFaceApp {
       this.stream = stream;
       this.$video.srcObject = stream;
       await this.$video.play();
+
+      // Lock camera auto-adjustments after stream starts
+      await this._lockCameraSettings(stream);
+
       this._updateCamBtn();
       this.$startScreen.classList.add("hidden");
       this.running = true;
@@ -1043,6 +1197,10 @@ class HeartFaceApp {
       this.stream = stream;
       this.$video.srcObject = stream;
       await this.$video.play();
+
+      // Lock camera auto-adjustments after stream starts
+      await this._lockCameraSettings(stream);
+
       this._updateCamBtn();
     } catch (err) {
       this.$statusMsg.textContent = `Camera error: ${err.message}`;
@@ -1053,7 +1211,7 @@ class HeartFaceApp {
   _toggleDebug() {
     this.debugMode = this.debugMode === 0 ? 1 : 0;
 
-    const labels = ["Debug View", "Debug: Full ▼"];
+    const labels = ["Debug View", "Debug: ON"];
     this.$debugBtn.textContent = labels[this.debugMode];
     this.$debugBtn.classList.toggle("active", this.debugMode > 0);
     this.$debugLevelSelect.classList.toggle("hidden", this.debugMode === 0);
@@ -1171,7 +1329,7 @@ class HeartFaceApp {
     };
     doBeat(); // immediate first beat
     this._beatInterval = setInterval(doBeat, interval);
-    this.$beatSyncLabel.innerHTML = '<span class="heart-dot">❤</span> pulsing at your heart rate';
+    this.$beatSyncLabel.innerHTML = '<span class="heart-dot">\u2764</span> pulsing at your heart rate';
   }
 
   _stopBeatPulse() {
@@ -1202,21 +1360,38 @@ class HeartFaceApp {
 
     const faceDrawn = this.overlayRenderer.draw(
       this.currentROI,
-      this.currentResult,
-      filtered,
-      this.evmEnabled
+      this.currentResult
     );
     // Show the static guide oval only when no face has been detected yet
     this.$faceGuide.style.opacity = faceDrawn ? "0" : "";
 
     if (this.debugEnabled) {
       const isMirrored = this.facingMode === "user";
+
+      // Build diagnostics object
+      const chromSig = this.signalEngine.getSignal();
+      const diagnostics = {
+        fps: this.signalEngine.fps,
+        videoW: this.$video.videoWidth,
+        videoH: this.$video.videoHeight,
+        bufferLen: this.signalEngine.frameCount,
+        lastMean: this.signalEngine.lastMean,
+        chromSigVal: chromSig.length > 0 ? chromSig[chromSig.length - 1] : 0,
+        chromWinSize: Math.min(this.signalEngine.frameCount, Math.max(15, Math.round(this.signalEngine.fps * 1.0))),
+        result: this.currentResult || this.signalEngine.estimate(),
+        smoothBPM: this.currentResult?.bpm,
+        hasFaceDetector: this.roiTracker.hasFaceDetector,
+        roiDetected: this.currentROI?.detected || false,
+        cameraSettings: this._cameraSettings,
+      };
+
       this.debugRenderer.draw(
         this.$video,
         this.currentROI,
         filtered,
         this.debugLevel,
-        isMirrored
+        isMirrored,
+        diagnostics
       );
     }
   }

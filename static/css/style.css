@@ -178,19 +178,6 @@ button.active {
 }
 button.hidden { display: none !important; }
 
-/* ── EVM explainer panel ─────────────────────────────────────────────────── */
-#evm-panel {
-  display: none;
-  background: var(--surface2);
-  padding: 8px 16px;
-  font-size: 11px;
-  color: var(--text-dim);
-  text-align: center;
-  line-height: 1.5;
-}
-#evm-panel.visible { display: block; }
-#evm-panel strong { color: var(--primary); }
-
 /* ── Overlays / modals ───────────────────────────────────────────────────── */
 .screen-overlay {
   position: absolute;
