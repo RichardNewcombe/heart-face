@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0a1a">
+  <!-- iOS PWA meta -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="HeartFace">
+  <!-- Description -->
+  <meta name="description"
+        content="Measure your heart rate from your face using Eulerian Video Magnification. Open in your browser — no app download needed.">
+
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+  <link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/css/style.css">
+
+  <title>HeartFace – Heart Rate Monitor</title>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Camera ─────────────────────────────────────────────────── -->
+  <div id="camera-wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <!-- Face-guide oval (always visible, behind overlay drawings) -->
+    <div id="face-guide">
+      <svg viewBox="0 0 100 130" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <ellipse cx="50" cy="65" rx="42" ry="58"
+                 stroke="#00ff88" stroke-width="2" stroke-dasharray="6 4"/>
+      </svg>
+    </div>
+  </div>
+
+  <!-- ── HUD ────────────────────────────────────────────────────── -->
+  <div id="hud">
+    <div id="status-msg">Position your face in the oval</div>
+    <div id="bpm-row">
+      <span id="bpm-value">--</span>
+      <span id="bpm-unit">BPM</span>
+    </div>
+    <div id="conf-bar-wrap">
+      <div id="conf-bar"><div id="conf-fill"></div></div>
+      <div id="conf-label"></div>
+    </div>
+  </div>
+
+  <!-- ── Waveform ───────────────────────────────────────────────── -->
+  <canvas id="waveform"></canvas>
+
+  <!-- ── EVM info strip ─────────────────────────────────────────── -->
+  <div id="evm-panel">
+    <strong>Eulerian Video Magnification active</strong> — subtle blood-flow
+    colour changes in your skin are amplified to show the pulse in real time.
+    <span style="color:rgba(255,100,100,0.9)">Red</span> = systole &nbsp;|&nbsp;
+    <span style="color:rgba(100,200,255,0.9)">Cyan</span> = diastole.
+  </div>
+
+  <!-- ── Controls ───────────────────────────────────────────────── -->
+  <div id="controls">
+    <button id="evm-btn">Show Pulse Glow</button>
+    <button id="info-btn">How it works</button>
+    <button id="install-btn" class="hidden">Install App</button>
+  </div>
+
+  <!-- ── Start screen ───────────────────────────────────────────── -->
+  <div id="start-screen" class="screen-overlay">
+    <div class="card">
+      <span class="heart-icon">♥</span>
+      <h1>HeartFace</h1>
+      <p class="tagline">
+        Detect your heart rate from your face using
+        <strong>Eulerian Video Magnification</strong> — the same algorithm
+        from MIT CSAIL that makes the pulse in your skin
+        <em>visible</em> to the naked eye.
+      </p>
+      <ul class="tips">
+        <li><span class="tip-icon">💡</span>Sit in bright, even lighting</li>
+        <li><span class="tip-icon">🤳</span>Hold your phone steady</li>
+        <li><span class="tip-icon">😶</span>Keep your face centred in the oval</li>
+        <li><span class="tip-icon">⏱️</span>Stay still for ~10 seconds</li>
+      </ul>
+      <button id="start-btn">Start Measuring</button>
+      <p id="camera-err" class="hidden"></p>
+    </div>
+  </div>
+
+  <!-- ── "How it works" modal ───────────────────────────────────── -->
+  <div id="info-modal" class="screen-overlay hidden">
+    <div class="modal-card">
+      <h2>How HeartFace Works</h2>
+
+      <p>
+        HeartFace implements the core ideas of
+        <strong>Eulerian Video Magnification</strong> (Wu et al., MIT 2012)
+        for contact-free heart rate measurement (rPPG).
+      </p>
+
+      <ol class="steps">
+        <li>
+          <strong>Gaussian pyramid</strong> — each video frame is
+          spatially decomposed into a multi-scale pyramid. The coarsest
+          level (a single, spatially-averaged pixel per colour channel)
+          captures the broadest colour variation across the face.
+        </li>
+        <li>
+          <strong>Temporal signal</strong> — across hundreds of frames
+          we record how the mean <code>R</code>, <code>G</code>,
+          <code>B</code> colour of your forehead changes over time.
+          Blood pumping through skin capillaries causes a periodic
+          colour shift of ≈0.5%.
+        </li>
+        <li>
+          <strong>CHROM normalisation</strong> — illumination changes
+          are cancelled by computing the chrominance ratio
+          <code>3R − 2G</code>, isolating haemoglobin absorption.
+        </li>
+        <li>
+          <strong>Bandpass + FFT</strong> — the signal is filtered to
+          0.75–4 Hz (45–240 BPM) and a Fast Fourier Transform finds
+          the dominant frequency → your heart rate.
+        </li>
+        <li>
+          <strong>EVM visualisation</strong> — pressing "Show Pulse Glow"
+          amplifies the bandpassed signal as a colour overlay on your face,
+          making the pulse <em>visible</em> just like the original MIT
+          paper demos.
+        </li>
+      </ol>
+
+      <p>
+        All processing runs <strong>entirely in your browser</strong>.
+        No video is ever sent to a server.
+      </p>
+
+      <button id="info-close">Close</button>
+    </div>
+  </div>
+
+  <!-- iOS install prompt (shown manually) -->
+  <div id="ios-prompt" class="hidden">
+    <span id="ios-dismiss">×</span>
+    To install: tap <strong>Share</strong> then
+    <strong>"Add to Home Screen"</strong>
+  </div>
+
+</div><!-- #app -->
+
+<script src="/static/js/app.js"></script>
+<script>
+  // Show iOS install hint once per session
+  (function () {
+    const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    const isStandalone = window.navigator.standalone === true;
+    if (isIOS && !isStandalone && !sessionStorage.getItem('iosPromptDismissed')) {
+      const el = document.getElementById('ios-prompt');
+      el.classList.remove('hidden');
+      document.getElementById('ios-dismiss').addEventListener('click', () => {
+        el.classList.add('hidden');
+        sessionStorage.setItem('iosPromptDismissed', '1');
+      });
+    }
+  })();
+</script>
+
+</body>
+</html>
