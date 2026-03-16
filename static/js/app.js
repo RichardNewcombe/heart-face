@@ -572,21 +572,23 @@ class OverlayRenderer {
   }
 
   /**
-   * Draw face guide, ROI box, and optional EVM colour-amplification overlay.
-   * All ROI coordinates are in video pixel space and are scaled to canvas space.
+   * Draw face overlays. Only draws when a face is actually detected.
+   * When no face detected, nothing is drawn so the static guide oval shows through.
+   * Returns true if a detected face was drawn (so the caller can hide the static oval).
    */
   draw(roi, result, filteredSignal, evmEnabled) {
     const ctx = this.ctx;
-    // Use logical CSS-pixel dimensions (canvas context has devicePixelRatio scale applied)
     const W = this.canvas.offsetWidth;
     const H = this.canvas.offsetHeight;
     ctx.clearRect(0, 0, W, H);
-    if (!roi) return;
+
+    // Only draw overlays when a real face is detected — otherwise let the
+    // static SVG guide oval tell the user to position their face.
+    if (!roi || !roi.detected) return false;
 
     const t = this._getVideoTransform();
-    if (!t) return;
+    if (!t) return false;
 
-    // Helpers to map video coords → canvas CSS-pixel coords
     const mx = (x) => t.ox + x * t.s;
     const my = (y) => t.oy + y * t.s;
     const ms = (s) => s * t.s;
@@ -599,7 +601,6 @@ class OverlayRenderer {
       const sigVal = filteredSignal[filteredSignal.length - 1];
       const amp = Math.tanh(Math.abs(sigVal) * 40) * 0.28;
       const [r, g, b] = sigVal > 0 ? [255, 60, 60] : [60, 200, 255];
-
       ctx.save();
       ctx.globalAlpha = amp;
       ctx.fillStyle = `rgb(${r},${g},${b})`;
@@ -619,12 +620,7 @@ class OverlayRenderer {
     if (faceBox) {
       const fx = mx(faceBox.x), fy = my(faceBox.y);
       const fw = ms(faceBox.w), fh = ms(faceBox.h);
-      const color =
-        conf > 0.55
-          ? "#00ff88"
-          : conf > 0.25
-          ? "#ffcc00"
-          : "rgba(255,255,255,0.35)";
+      const color = conf > 0.55 ? "#00ff88" : conf > 0.25 ? "#ffcc00" : "rgba(255,255,255,0.5)";
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       const c = Math.min(fw, fh) * 0.14;
@@ -632,22 +628,17 @@ class OverlayRenderer {
       this._corner(ctx, fx + fw, fy, -c, c);
       this._corner(ctx, fx, fy + fh, c, -c);
       this._corner(ctx, fx + fw, fy + fh, -c, -c);
-
-      ctx.font = "11px -apple-system,sans-serif";
-      ctx.fillStyle = color;
-      ctx.fillText(roi.detected ? "Face detected" : "Align face here", fx, fy - 6);
     }
 
-    // ── Forehead ROI dashed rectangle ─────────────────────────────────────
+    // ── Forehead ROI (the actual sampling region) ──────────────────────────
     const rx = mx(roi.x), ry = my(roi.y), rw = ms(roi.w), rh = ms(roi.h);
-    ctx.strokeStyle = "rgba(0,255,136,0.55)";
+    ctx.strokeStyle = "rgba(0,255,136,0.6)";
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
     ctx.strokeRect(rx, ry, rw, rh);
     ctx.setLineDash([]);
-    ctx.fillStyle = "rgba(0,255,136,0.7)";
-    ctx.font = "10px -apple-system,sans-serif";
-    ctx.fillText("Forehead ROI", rx + 2, ry - 4);
+
+    return true; // face was drawn — hide the static guide oval
   }
 
   _corner(ctx, x, y, dx, dy) {
@@ -865,6 +856,7 @@ class HeartFaceApp {
     this.$debugCanvas = document.getElementById("debug-canvas");
     this.$debugLevelSelect = document.getElementById("debug-level-select");
     this.$cameraPreSelect = document.getElementById("camera-pre-select");
+    this.$faceGuide = document.getElementById("face-guide");
 
     // Engines
     this.signalEngine = new SignalEngine();
@@ -1169,12 +1161,14 @@ class HeartFaceApp {
       this.currentResult?.confidence || 0
     );
 
-    this.overlayRenderer.draw(
+    const faceDrawn = this.overlayRenderer.draw(
       this.currentROI,
       this.currentResult,
       filtered,
       this.evmEnabled
     );
+    // Show the static guide oval only when no face has been detected yet
+    this.$faceGuide.style.opacity = faceDrawn ? "0" : "";
 
     if (this.debugEnabled) {
       const isMirrored = this.facingMode === "user";
