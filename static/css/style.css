@@ -429,5 +429,20 @@ button.hidden { display: none !important; }
 }
 #debug-level-select:focus { outline: none; border-color: var(--primary); }
 
+/* ── Build version ─────────────────────────────────────────────────────── */
+#build-version {
+  margin-top: 16px;
+  font-size: 11px;
+  color: var(--text-mute);
+  letter-spacing: 0.03em;
+}
+#build-tag {
+  font-size: 10px;
+  color: var(--text-mute);
+  padding: 4px 8px;
+  letter-spacing: 0.03em;
+  align-self: center;
+}
+
 /* ── Utility ─────────────────────────────────────────────────────────────── */
 .hidden { display: none !important; }
