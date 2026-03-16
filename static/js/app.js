@@ -857,6 +857,7 @@ class HeartFaceApp {
     this.$debugLevelSelect = document.getElementById("debug-level-select");
     this.$cameraPreSelect = document.getElementById("camera-pre-select");
     this.$faceGuide = document.getElementById("face-guide");
+    this.$beatSyncLabel = document.getElementById("beat-sync-label");
 
     // Engines
     this.signalEngine = new SignalEngine();
@@ -869,7 +870,7 @@ class HeartFaceApp {
     // State
     this.running = false;
     this.evmEnabled = false;
-    /** 0 = off, 1 = PiP, 2 = full-page */
+    /** 0 = off, 1 = full-page */
     this.debugMode = 0;
     /** -1 = EVM amplified, 0 = raw, 1-3 = pyramid level */
     this.debugLevel = -1;
@@ -881,6 +882,7 @@ class HeartFaceApp {
     this.filteredSignal = [];
     this.bpmHistory = [];
     this._deferredInstall = null;
+    this._beatInterval = null;  // timer for BPM-synced pulsing
 
     this._bindEvents();
     this._initPWA();
@@ -935,7 +937,7 @@ class HeartFaceApp {
       c.getContext("2d").scale(devicePixelRatio, devicePixelRatio);
     });
     // Re-size full-page debug canvas if active
-    if (this.debugMode === 2) {
+    if (this.debugMode === 1) {
       this.$debugCanvas.width = this.$debugCanvas.offsetWidth;
       this.$debugCanvas.height = this.$debugCanvas.offsetHeight;
     }
@@ -1038,11 +1040,11 @@ class HeartFaceApp {
     }
   }
 
-  /** Cycle through: off → PiP → full-page → off */
+  /** Toggle debug: off → full-page → off */
   _toggleDebug() {
-    this.debugMode = (this.debugMode + 1) % 3;
+    this.debugMode = this.debugMode === 0 ? 1 : 0;
 
-    const labels = ["Debug View", "Debug: PiP ▼", "Debug: Full ▼"];
+    const labels = ["Debug View", "Debug: Full ▼"];
     this.$debugBtn.textContent = labels[this.debugMode];
     this.$debugBtn.classList.toggle("active", this.debugMode > 0);
     this.$debugLevelSelect.classList.toggle("hidden", this.debugMode === 0);
@@ -1051,12 +1053,6 @@ class HeartFaceApp {
       // Off
       this.$debugCanvas.classList.add("hidden");
       this.$debugCanvas.classList.remove("debug-fullpage");
-    } else if (this.debugMode === 1) {
-      // PiP
-      this.$debugCanvas.classList.remove("hidden");
-      this.$debugCanvas.classList.remove("debug-fullpage");
-      this.$debugCanvas.width = 160;
-      this.$debugCanvas.height = 120;
     } else {
       // Full-page
       this.$debugCanvas.classList.remove("hidden");
@@ -1129,20 +1125,54 @@ class HeartFaceApp {
           : "#ff4466";
 
       if (r.confidence > 0.55) {
-        this.$statusMsg.textContent = "Good signal — keep still";
+        this.$statusMsg.textContent = "Good signal \u2014 keep still";
         this.$confLabel.textContent = `${pct}% confidence`;
-        this.$bpmValue.classList.remove("beat");
-        void this.$bpmValue.offsetWidth;
-        this.$bpmValue.classList.add("beat");
-        setTimeout(() => this.$bpmValue.classList.remove("beat"), 350);
+        this._startBeatPulse(smoothBPM);
       } else if (r.confidence > 0.25) {
         this.$statusMsg.textContent = "Stay still for better accuracy";
         this.$confLabel.textContent = `${pct}% confidence`;
       } else {
-        this.$statusMsg.textContent = "Ensure good lighting — face centred";
+        this.$statusMsg.textContent = "Ensure good lighting \u2014 face centred";
         this.$confLabel.textContent = "Low signal";
+        this._stopBeatPulse();
       }
     }
+  }
+
+  /**
+   * Start pulsing the BPM display at the detected heart rate.
+   * The pulse interval matches the actual BPM so the user can see
+   * the text "beating" in sync with their estimated heart rate.
+   */
+  _startBeatPulse(bpm) {
+    if (!bpm || bpm < 30) { this._stopBeatPulse(); return; }
+    const interval = 60000 / bpm; // ms between beats
+
+    // Only restart if BPM changed significantly (avoid jitter)
+    if (this._beatInterval && this._lastBeatBPM &&
+        Math.abs(bpm - this._lastBeatBPM) < 3) return;
+
+    this._stopBeatPulse();
+    this._lastBeatBPM = bpm;
+
+    const doBeat = () => {
+      this.$bpmValue.classList.remove("beat");
+      void this.$bpmValue.offsetWidth;
+      this.$bpmValue.classList.add("beat");
+    };
+    doBeat(); // immediate first beat
+    this._beatInterval = setInterval(doBeat, interval);
+    this.$beatSyncLabel.innerHTML = '<span class="heart-dot">❤</span> pulsing at your heart rate';
+  }
+
+  _stopBeatPulse() {
+    if (this._beatInterval) {
+      clearInterval(this._beatInterval);
+      this._beatInterval = null;
+    }
+    this._lastBeatBPM = null;
+    this.$bpmValue.classList.remove("beat");
+    this.$beatSyncLabel.textContent = '';
   }
 
   // ── Rendering ─────────────────────────────────────────────────────────

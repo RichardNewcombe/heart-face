@@ -330,13 +330,27 @@ button.hidden { display: none !important; }
   border-color: rgba(255,255,255,0.2);
 }
 
-/* ── BPM beat animation ──────────────────────────────────────────────────── */
+/* ── BPM beat animation (pulses at detected heart rate) ─────────────────── */
 @keyframes bpm-beat {
-  0%   { transform: scale(1); }
-  15%  { transform: scale(1.06); }
-  30%  { transform: scale(1); }
+  0%   { transform: scale(1);    color: var(--primary); }
+  12%  { transform: scale(1.10); color: #ff6666; }
+  35%  { transform: scale(1);    color: var(--primary); }
 }
-#bpm-value.beat { animation: bpm-beat 0.35s ease-out; }
+#bpm-value.beat { animation: bpm-beat 0.4s ease-out; }
+
+/* Beat sync label */
+#beat-sync-label {
+  font-size: 11px;
+  color: var(--text-mute);
+  text-align: center;
+  height: 16px;
+  letter-spacing: 0.03em;
+  transition: opacity 0.4s;
+}
+#beat-sync-label .heart-dot {
+  color: #ff6666;
+  font-size: 13px;
+}
 
 /* ── iOS PWA install prompt ──────────────────────────────────────────────── */
 #ios-prompt {
@@ -385,15 +399,9 @@ button.hidden { display: none !important; }
 }
 #camera-pre-select:focus { outline: none; border-color: var(--primary); }
 
-/* ── Debug PiP canvas ────────────────────────────────────────────────────── */
+/* ── Debug canvas (full-page only) ───────────────────────────────────────── */
 #debug-canvas {
   position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 160px;
-  height: 120px;
-  border: 1.5px solid rgba(0,255,136,0.45);
-  border-radius: 8px;
   z-index: 10;
   background: #000;
   pointer-events: none;
